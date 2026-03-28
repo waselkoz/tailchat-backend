@@ -72,9 +72,102 @@ const sendVoice = async (req, res) => {
     res.status(500).json({ error: 'Server error' });
   }
 };
-const editMessage = async (req, res) => res.status(501).json({ error: 'Not implemented' });
-const deleteMessage = async (req, res) => res.status(501).json({ error: 'Not implemented' });
-const markAsRead = async (req, res) => res.status(501).json({ error: 'Not implemented' });
-const getUnreadCount = async (req, res) => res.status(501).json({ error: 'Not implemented' });
-const searchMessages = async (req, res) => res.status(501).json({ error: 'Not implemented' });
+const editMessage = async (req, res) => {
+  try {
+    const { id: messageId } = req.params;
+    const { content } = req.body;
+    
+    const message = await Message.findById(messageId);
+    if (!message) return res.status(404).json({ error: 'Message not found' });
+    if (message.sender.toString() !== req.userId) return res.status(403).json({ error: 'Unauthorized to edit this message' });
+    
+    message.content = content;
+    message.edited = true;
+    message.editedAt = new Date();
+    await message.save();
+    
+    const io = req.app.get('io');
+    if (io) io.to(`chat:${message.chatId}`).emit('message:edited', message);
+    
+    res.json({ success: true, message });
+  } catch (error) {
+    console.error('EditMessage error:', error);
+    res.status(500).json({ error: 'Server error' });
+  }
+};
+
+const deleteMessage = async (req, res) => {
+  try {
+    const { id: messageId } = req.params;
+    const message = await Message.findById(messageId);
+    if (!message) return res.status(404).json({ error: 'Message not found' });
+    
+    const chat = await Chat.findById(message.chatId);
+    const isAdmin = chat?.isGroup && chat?.admin?.toString() === req.userId;
+    const isSender = message.sender.toString() === req.userId;
+    
+    if (!isSender && !isAdmin) return res.status(403).json({ error: 'Unauthorized to delete this message' });
+    
+    message.deleted = true;
+    message.content = 'This message was deleted';
+    await message.save();
+    
+    const io = req.app.get('io');
+    if (io) io.to(`chat:${message.chatId}`).emit('message:deleted', { messageId, chatId: message.chatId });
+    
+    res.json({ success: true, message: 'Message deleted' });
+  } catch (error) {
+    console.error('DeleteMessage error:', error);
+    res.status(500).json({ error: 'Server error' });
+  }
+};
+
+const markAsRead = async (req, res) => {
+  try {
+    const { chatId } = req.params;
+    await Message.updateMany(
+      { chatId, readBy: { $ne: req.userId }, sender: { $ne: req.userId } },
+      { $addToSet: { readBy: req.userId } }
+    );
+    
+    const chat = await Chat.findById(chatId);
+    if (chat?.unreadCount) {
+      chat.unreadCount.set(req.userId.toString(), 0);
+      await chat.save();
+    }
+    
+    const io = req.app.get('io');
+    if (io) io.to(`chat:${chatId}`).emit('messages:read', { chatId, userId: req.userId });
+    
+    res.json({ success: true, message: 'Messages marked as read' });
+  } catch (error) {
+    console.error('MarkAsRead error:', error);
+    res.status(500).json({ error: 'Server error' });
+  }
+};
+
+const getUnreadCount = async (req, res) => {
+  try {
+    const chats = await Chat.find({ participants: req.userId });
+    let totalUnread = 0;
+    chats.forEach(chat => {
+      totalUnread += chat.unreadCount?.get(req.userId.toString()) || 0;
+    });
+    res.json({ success: true, totalUnread });
+  } catch (error) {
+    res.status(500).json({ error: 'Server error' });
+  }
+};
+
+const searchMessages = async (req, res) => {
+  try {
+    const { chatId } = req.params;
+    const { q = '' } = req.query;
+    const messages = await Message.find({ chatId, content: { $regex: q, $options: 'i' }, deleted: false }).populate('sender', 'username avatar');
+    res.json({ success: true, messages });
+  } catch (error) {
+    res.status(500).json({ error: 'Server error' });
+  }
+};
+
 module.exports = { sendMessage, sendImage, sendVoice, editMessage, deleteMessage, markAsRead, getUnreadCount, searchMessages };

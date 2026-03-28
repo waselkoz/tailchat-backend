@@ -89,14 +89,22 @@ const deleteComment = async (req, res) => {
     const { id, commentId } = req.params;
     const tail = await Message.findById(id);
     if (!tail || !tail.isTail) return res.status(404).json({ error: 'Tail not found' });
+    
     const comment = tail.comments.id(commentId);
     if (!comment) return res.status(404).json({ error: 'Comment not found' });
-    if (comment.user.toString() !== req.userId && tail.sender.toString() !== req.userId) return res.status(403).json({ error: 'Unauthorized' });
-    comment.remove();
+    
+    // Authorization check: User must be comment owner or tail owner
+    if (comment.user.toString() !== req.userId && tail.sender.toString() !== req.userId) {
+      return res.status(403).json({ error: 'Unauthorized to delete this comment' });
+    }
+
+    tail.comments.pull(commentId);
     await tail.save();
+    
     const io = req.app.get('io');
     if (io) io.emit('tail:commentDeleted', { tailId: id, commentId });
-    res.json({ success: true, message: 'Deleted' });
+    
+    res.json({ success: true, message: 'Comment deleted' });
   } catch (error) {
     console.error('DeleteComment error:', error);
     res.status(500).json({ error: 'Server error' });
