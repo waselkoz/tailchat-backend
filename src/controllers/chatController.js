@@ -1,6 +1,7 @@
 const Chat = require('../models/Chat');
 const Message = require('../models/Message');
 const User = require('../models/User');
+
 const getOrCreatePrivateChat = async (req, res) => {
   try {
     const { userId } = req.body;
@@ -18,14 +19,26 @@ const getOrCreatePrivateChat = async (req, res) => {
     res.status(500).json({ error: 'Server error' });
   }
 };
+
 const createGroupChat = async (req, res) => {
   try {
-    const { name, participants = [], avatar } = req.body;
+    const { name, participants = [], avatar, isPublic, description } = req.body;
     if (!name || name.trim() === '') return res.status(400).json({ error: 'Group name required' });
+    
     const allParticipants = [req.userId, ...participants];
-    const chat = new Chat({ name, participants: allParticipants, isGroup: true, admin: req.userId, avatar: avatar || '' });
+    const chat = new Chat({ 
+      name, 
+      participants: allParticipants, 
+      isGroup: true, 
+      admin: req.userId, 
+      avatar: avatar || '',
+      isPublic: !!isPublic,
+      description: description || ''
+    });
+    
     await chat.save();
     await chat.populate('participants', '-password');
+    
     const io = req.app.get('io');
     if (io) {
       allParticipants.forEach(id => io.to(`user:${id}`).emit('chat:new', chat));
@@ -36,6 +49,7 @@ const createGroupChat = async (req, res) => {
     res.status(500).json({ error: 'Server error' });
   }
 };
+
 const getUserChats = async (req, res) => {
   try {
     const chats = await Chat.find({ participants: req.userId }).populate('participants', '-password').populate('lastMessage').sort({ updatedAt: -1 });
@@ -50,6 +64,7 @@ const getUserChats = async (req, res) => {
     res.status(500).json({ error: 'Server error' });
   }
 };
+
 const getChatById = async (req, res) => {
   try {
     const chat = await Chat.findById(req.params.id).populate('participants', '-password').populate('lastMessage');
@@ -65,6 +80,7 @@ const getChatById = async (req, res) => {
     res.status(500).json({ error: 'Server error' });
   }
 };
+
 const getChatMessages = async (req, res) => {
   try {
     const { id: chatId } = req.params;
@@ -80,15 +96,20 @@ const getChatMessages = async (req, res) => {
     res.status(500).json({ error: 'Server error' });
   }
 };
+
 const updateGroupChat = async (req, res) => {
   try {
     const { id } = req.params;
-    const { name, avatar } = req.body;
+    const { name, avatar, isPublic, description } = req.body;
     const chat = await Chat.findById(id);
     if (!chat) return res.status(404).json({ error: 'Chat not found' });
     if (chat.isGroup && chat.admin.toString() !== req.userId) return res.status(403).json({ error: 'Admin only' });
+    
     if (name) chat.name = name;
     if (avatar) chat.avatar = avatar;
+    if (isPublic !== undefined) chat.isPublic = isPublic;
+    if (description !== undefined) chat.description = description;
+
     await chat.save();
     await chat.populate('participants', '-password');
     const io = req.app.get('io');
@@ -101,6 +122,7 @@ const updateGroupChat = async (req, res) => {
     res.status(500).json({ error: 'Server error' });
   }
 };
+
 const addParticipants = async (req, res) => {
   try {
     const { id } = req.params;
@@ -122,6 +144,7 @@ const addParticipants = async (req, res) => {
     res.status(500).json({ error: 'Server error' });
   }
 };
+
 const deleteChat = async (req, res) => {
   try {
     const { id } = req.params;
@@ -141,6 +164,7 @@ const deleteChat = async (req, res) => {
     res.status(500).json({ error: 'Server error' });
   }
 };
+
 const removeParticipant = async (req, res) => {
   try {
     const { id, userId } = req.params;
@@ -153,19 +177,235 @@ const removeParticipant = async (req, res) => {
     res.status(500).json({ error: 'Server error' });
   }
 };
+
 const leaveGroup = async (req, res) => {
   try {
     const { id } = req.params;
     const chat = await Chat.findById(id);
     if (!chat.isGroup) return res.status(400).json({ error: 'Not a group' });
+    
+    // Check if user is a participant
+    if (!chat.participants.includes(req.userId)) {
+      return res.status(400).json({ error: 'You are not in this group' });
+    }
+
+    // Check if user is the admin
+    const isAdmin = chat.admin && chat.admin.toString() === req.userId;
+
     chat.participants = chat.participants.filter(p => p.toString() !== req.userId);
-    if (chat.admin.toString() === req.userId && chat.participants.length > 0) chat.admin = chat.participants[0];
+    
+    // Assign new admin if needed
+    if (isAdmin && chat.participants.length > 0) {
+      chat.admin = chat.participants[0];
+    }
+    
     await chat.save();
-    res.json({ success: true, message: 'Left' });
+    res.json({ success: true, message: 'Left successfully' });
   } catch (error) {
     res.status(500).json({ error: 'Server error' });
   }
 };
+
+// NEW: Discovery and Public Rooms Logic
+
+const getPublicRooms = async (req, res) => {
+  try {
+    const { page = 1, limit = 20, search = '' } = req.query;
+    const skip = (parseInt(page) - 1) * parseInt(limit);
+
+    // Build query
+    const query = {
+      isGroup: true,
+      $or: [
+        { isPublic: true },
+        { 'tailMetadata.visibility': 'public' }
+      ]
+    };
+
+    if (search) {
+      query.name = { $regex: search, $options: 'i' };
+    }
+
+    const total = await Chat.countDocuments(query);
+    const rooms = await Chat.find(query)
+      .populate('participants', 'username avatar status')
+      .populate('admin', 'username avatar')
+      .populate('lastMessage')
+      .sort({ updatedAt: -1 })
+      .skip(skip)
+      .limit(parseInt(limit));
+
+    const roomsWithDetails = rooms.map(room => {
+      const roomObj = room.toObject();
+      const isJoined = room.participants.some(p => p._id.toString() === req.userId);
+      const participantCount = room.participants.length;
+      
+      const onlineCount = room.participants.filter(p => 
+        global.onlineUsers?.has(p._id.toString())
+      ).length;
+
+      return {
+        ...roomObj,
+        isJoined,
+        participantCount,
+        onlineCount,
+      };
+    });
+
+    res.json({
+      success: true,
+      rooms: roomsWithDetails,
+      pagination: {
+        page: parseInt(page),
+        limit: parseInt(limit),
+        total,
+        pages: Math.ceil(total / parseInt(limit)),
+      },
+    });
+  } catch (error) {
+    console.error('GetPublicRooms error:', error);
+    res.status(500).json({ error: 'Server error' });
+  }
+};
+
+const getRoomDetails = async (req, res) => {
+  try {
+    const { id } = req.params;
+    const room = await Chat.findOne({ _id: id, isGroup: true })
+      .populate('participants', 'username avatar status lastSeen')
+      .populate('admin', 'username avatar')
+      .populate('lastMessage');
+
+    if (!room) return res.status(404).json({ error: 'Room not found' });
+
+    const isParticipant = room.participants.some(p => p._id.toString() === req.userId);
+    const isPublic = room.isPublic || room.tailMetadata?.visibility === 'public';
+    
+    if (!isParticipant && !isPublic) {
+      return res.status(403).json({ error: 'Access denied. This room is private.' });
+    }
+
+    const participantsWithStatus = room.participants.map(p => ({
+      ...p.toObject(),
+      isOnline: global.onlineUsers?.has(p._id.toString()),
+    }));
+
+    res.json({
+      success: true,
+      room: {
+        ...room.toObject(),
+        participants: participantsWithStatus,
+        participantCount: room.participants.length,
+        onlineCount: participantsWithStatus.filter(p => p.isOnline).length,
+        isParticipant,
+      },
+    });
+  } catch (error) {
+    console.error('GetRoomDetails error:', error);
+    res.status(500).json({ error: 'Server error' });
+  }
+};
+
+const joinPublicRoom = async (req, res) => {
+  try {
+    const { id } = req.params;
+    const room = await Chat.findOne({ _id: id, isGroup: true });
+
+    if (!room) return res.status(404).json({ error: 'Room not found' });
+
+    const isPublic = room.isPublic || room.tailMetadata?.visibility === 'public';
+    if (!isPublic) return res.status(403).json({ error: 'This room is private.' });
+
+    if (room.participants.includes(req.userId)) {
+      return res.status(400).json({ error: 'Already in this room' });
+    }
+
+    room.participants.push(req.userId);
+    await room.save();
+    await room.populate('participants', 'username avatar status');
+
+    const updatedParticipants = room.participants.map(p => ({
+      ...p.toObject(),
+      isOnline: global.onlineUsers?.has(p._id.toString()),
+    }));
+
+    const io = req.app.get('io');
+    if (io) {
+      io.to(`chat:${id}`).emit('user:joined', {
+        userId: req.userId,
+        chatId: id,
+        participants: updatedParticipants,
+      });
+    }
+
+    res.json({ success: true, room: { ...room.toObject(), participants: updatedParticipants } });
+  } catch (error) {
+    console.error('JoinPublicRoom error:', error);
+    res.status(500).json({ error: 'Server error' });
+  }
+};
+
+const leavePublicRoom = async (req, res) => {
+  try {
+    const { id } = req.params;
+    const room = await Chat.findOne({ _id: id, isGroup: true });
+
+    if (!room) return res.status(404).json({ error: 'Room not found' });
+    if (!room.participants.includes(req.userId)) return res.status(400).json({ error: 'Not in this room' });
+
+    const isAdmin = room.admin && room.admin.toString() === req.userId;
+
+    room.participants = room.participants.filter(p => p.toString() !== req.userId);
+    if (isAdmin && room.participants.length > 0) room.admin = room.participants[0];
+
+    await room.save();
+    await room.populate('participants', 'username avatar status');
+
+    const io = req.app.get('io');
+    if (io) {
+      io.to(`chat:${id}`).emit('user:left', {
+        userId: req.userId,
+        chatId: id,
+        participants: room.participants,
+      });
+    }
+
+    res.json({ success: true, message: 'Left successfully' });
+  } catch (error) {
+    console.error('LeavePublicRoom error:', error);
+    res.status(500).json({ error: 'Server error' });
+  }
+};
+
+const getRoomParticipants = async (req, res) => {
+  try {
+    const { id } = req.params;
+    const room = await Chat.findById(id).populate('participants', 'username avatar status lastSeen');
+
+    if (!room) return res.status(404).json({ error: 'Room not found' });
+
+    const isParticipant = room.participants.some(p => p._id.toString() === req.userId);
+    const isPublic = room.isPublic || room.tailMetadata?.visibility === 'public';
+
+    if (!isParticipant && !isPublic) return res.status(403).json({ error: 'Access denied' });
+
+    const participantsWithStatus = room.participants.map(p => ({
+      ...p.toObject(),
+      isOnline: global.onlineUsers?.has(p._id.toString()),
+    }));
+
+    res.json({
+      success: true,
+      participants: participantsWithStatus,
+      totalCount: participantsWithStatus.length,
+      onlineCount: participantsWithStatus.filter(p => p.isOnline).length,
+    });
+  } catch (error) {
+    console.error('GetRoomParticipants error:', error);
+    res.status(500).json({ error: 'Server error' });
+  }
+};
+
 module.exports = {
   getOrCreatePrivateChat,
   createGroupChat,
@@ -177,4 +417,9 @@ module.exports = {
   deleteChat,
   removeParticipant,
   leaveGroup,
+  getPublicRooms,
+  getRoomDetails,
+  joinPublicRoom,
+  leavePublicRoom,
+  getRoomParticipants,
 };

@@ -7,6 +7,8 @@ const ChatSchema = new mongoose.Schema({
   admin: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: function() { return this.isGroup === true; } },
   lastMessage: { type: mongoose.Schema.Types.ObjectId, ref: 'Message' },
   unreadCount: { type: Map, of: Number, default: {} },
+  isPublic: { type: Boolean, default: false },
+  description: { type: String, maxlength: 500, default: '' },
 }, { timestamps: true });
 ChatSchema.index({ participants: 1 });
 ChatSchema.index({ updatedAt: -1 });

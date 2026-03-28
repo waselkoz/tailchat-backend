@@ -127,5 +127,11 @@ app.use((err, req, res, next) => {
     ...(config.NODE_ENV === 'development' && { stack: err.stack }),
   });
 });
+const { onlineUsers, roomUsers, userRooms } = require('./socket/socketHandler');
+
+// Make these available globally for controllers
+global.onlineUsers = onlineUsers;
+global.roomUsers = roomUsers;
+global.userRooms = userRooms;
 
 module.exports = app;
