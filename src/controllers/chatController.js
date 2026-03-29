@@ -1,6 +1,8 @@
 const Chat = require('../models/Chat');
 const Message = require('../models/Message');
 const User = require('../models/User');
+const mongoose = require('mongoose');
+const jwt = require('jsonwebtoken');
 
 const getOrCreatePrivateChat = async (req, res) => {
   try {
@@ -52,12 +54,31 @@ const createGroupChat = async (req, res) => {
 
 const getUserChats = async (req, res) => {
   try {
-    const chats = await Chat.find({ participants: req.userId }).populate('participants', '-password').populate('lastMessage').sort({ updatedAt: -1 });
+    const token = req.headers.authorization?.split(' ')[1];
+    const directDecode = token ? jwt.decode(token) : null;
+    console.log('[DEBUG] Direct Token Decode in controller:', directDecode);
+    
+    // Explicitly fallback to exact token decode to fix the missing req.userId
+    const actualUserId = req.userId || (directDecode ? (directDecode.userId || directDecode.id || directDecode._id) : null);
+    
+    if (!actualUserId) {
+      return res.status(401).json({ success: false, error: 'Could not extract user ID from token' });
+    }
+
+    const userIdObj = new mongoose.Types.ObjectId(actualUserId);
+    
+    // Use the $in operator which is safer for array lookups in MongoDB
+    const chats = await Chat.find({ participants: { $in: [userIdObj] } })
+      .populate('participants', '-password')
+      .populate('lastMessage')
+      .sort({ updatedAt: -1 });
+
     const chatsWithUnread = chats.map(chat => {
       const chatObj = chat.toObject();
-      const unreadCount = chat.unreadCount?.get(req.userId.toString()) || 0;
+      const unreadCount = chat.unreadCount?.get(actualUserId.toString()) || 0;
       return { ...chatObj, unreadCount };
     });
+    
     res.json({ success: true, chats: chatsWithUnread });
   } catch (error) {
     console.error('GetUserChats error:', error);
@@ -406,6 +427,51 @@ const getRoomParticipants = async (req, res) => {
   }
 };
 
+const getUserProfileRooms = async (req, res) => {
+  try {
+    const { id: userId } = req.params;
+    const isOwnProfile = req.userId === userId;
+
+    const query = { participants: userId, isGroup: true };
+    
+    // If not their own profile, only show public rooms
+    if (!isOwnProfile) {
+      query.$or = [
+        { isPublic: true },
+        { 'tailMetadata.visibility': 'public' }
+      ];
+    }
+
+    const rooms = await Chat.find(query)
+      .populate('participants', 'username avatar status')
+      .populate('admin', 'username avatar')
+      .populate('lastMessage')
+      .sort({ updatedAt: -1 });
+
+    const roomsWithDetails = rooms.map(room => {
+      const roomObj = room.toObject();
+      const isJoined = room.participants.some(p => p._id && p._id.toString() === req.userId);
+      const participantCount = room.participants.length;
+      
+      const onlineCount = room.participants.filter(p => 
+        global.onlineUsers?.has(p._id && p._id.toString())
+      ).length;
+
+      return {
+        ...roomObj,
+        isJoined,
+        participantCount,
+        onlineCount,
+      };
+    });
+
+    res.json({ success: true, rooms: roomsWithDetails });
+  } catch (error) {
+    console.error('GetUserProfileRooms error:', error);
+    res.status(500).json({ error: 'Server error' });
+  }
+};
+
 module.exports = {
   getOrCreatePrivateChat,
   createGroupChat,
@@ -422,4 +488,5 @@ module.exports = {
   joinPublicRoom,
   leavePublicRoom,
   getRoomParticipants,
+  getUserProfileRooms,
 };

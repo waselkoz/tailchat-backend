@@ -7,7 +7,8 @@ const authMiddleware = async (req, res, next) => {
   if (!token) return res.status(401).json({ error: 'Authentication required', code: 'NO_TOKEN' });
   try {
     const decoded = jwt.verify(token, config.JWT_SECRET);
-    req.userId = decoded.userId;
+    req.userId = decoded.userId || decoded.id || decoded._id;
+    req.decodedPayload = decoded; // Added for debugging
     next();
   } catch (error) {
     const code = error.name === 'JsonWebTokenError' ? 'INVALID_TOKEN' : 

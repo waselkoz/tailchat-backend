@@ -12,6 +12,7 @@ const {
   joinPublicRoom,
   leavePublicRoom,
   getRoomParticipants,
+  getUserProfileRooms,
 } = require('../controllers/chatController');
 const authMiddleware = require('../middleware/auth');
 const { apiLimiter } = require('../middleware/rateLimiter');
@@ -21,6 +22,9 @@ const router = express.Router();
 
 // All routes require authentication
 router.use(authMiddleware);
+
+// User Profile Rooms
+router.get('/user/:id/rooms', validateId, getUserProfileRooms);
 
 // Discovery and Public Rooms (placed above /:id to prevent route collision)
 router.get('/rooms/public', getPublicRooms);

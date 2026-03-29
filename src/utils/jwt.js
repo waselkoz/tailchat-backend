@@ -2,8 +2,9 @@ const jwt = require('jsonwebtoken');
 const config = require('../config/env');
 
 const generateToken = (userId) => {
+  const idStr = String(userId);
   return jwt.sign(
-    { userId, id: userId }, // Include both for compatibility
+    { userId: idStr, id: idStr }, // Include both for compatibility
     config.JWT_SECRET,
     { expiresIn: config.JWT_EXPIRES_IN }
   );
